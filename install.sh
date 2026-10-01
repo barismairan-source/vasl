@@ -70,7 +70,9 @@ SERVER_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || curl -4 -fsS --
 [[ -n "$SERVER_IP" ]] || die "IP عمومی سرور پیدا نشد. با SERVER_IP=x.x.x.x دوباره اجرا کنید."
 
 info "بررسی دامنه‌ی استتار ($SNI)..."
-if ! "$XRAY" tls ping "$SNI" 2>&1 | grep -qi "TLS1.3\|TLS 1.3\|tls13"; then
+# خروجی را اول در متغیر می‌گیریم؛ grep -q در pipe با pipefail خطای کاذب می‌دهد
+SNI_CHECK="$("$XRAY" tls ping "$SNI" 2>&1 || true)"
+if ! grep -q "TLS 1.3" <<<"$SNI_CHECK"; then
     warn "به نظر می‌رسد $SNI از TLS 1.3 پشتیبانی نمی‌کند یا در دسترس نیست. بعداً با 'vasl sni-test' دامنه‌ی بهتری پیدا کنید."
 fi
 
