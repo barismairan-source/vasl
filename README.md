@@ -78,6 +78,7 @@ sudo vasl add mom      # کاربر جدید (برای هر نفر/دستگاه 
 sudo vasl del mom      # حذف کاربر
 vasl links             # همه‌ی لینک‌ها
 vasl qr mom            # QR Code
+sudo vasl diag         # عیب‌یابی کامل وقتی وصل نمیشه
 vasl status            # وضعیت و لاگ
 sudo vasl update       # به‌روزرسانی Xray-core
 ```

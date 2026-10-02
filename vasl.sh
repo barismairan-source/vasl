@@ -20,6 +20,7 @@ usage() {
   links [نام]          نمایش لینک‌های اتصال (همه یا یک کاربر)
   qr <نام>             نمایش QR Code برای اسکن با گوشی
   sni-test <دامنه>...  بررسی مناسب بودن دامنه برای استتار REALITY
+  diag                 عیب‌یابی کامل: تست سرور و بررسی رسیدن بسته‌ها از ایران
   status               وضعیت سرویس و لاگ‌های اخیر
   restart              راه‌اندازی دوباره‌ی سرویس
   update               به‌روزرسانی Xray-core به آخرین نسخه
@@ -127,6 +128,51 @@ case "$cmd" in
             fi
         done
         echo "دامنه‌ای را انتخاب کنید که ✅ است، زمان اتصالش کم است و در ایران فیلتر نیست."
+        ;;
+    diag)
+        need_root; load_state
+        echo "== سرویس =="
+        systemctl is-active xray || true
+        ss -tlnp | grep xray || echo "Xray روی هیچ پورتی گوش نمی‌دهد!"
+        ufw status 2>/dev/null | head -8 || true
+
+        echo; echo "== تست داخلی (سرور به خودش وصل می‌شود) =="
+        id="$(uuid_of "$(users | head -1)")"
+        for profile in vision xhttp; do
+            if [[ $profile == vision ]]; then
+                port=$VISION_PORT; flow=xtls-rprx-vision
+                net='{"network":"raw"}'
+            else
+                port=$XHTTP_PORT; flow=""
+                net="$(jq -nc --arg p "$XHTTP_PATH" '{network:"xhttp",xhttpSettings:{path:$p,mode:"auto"}}')"
+            fi
+            cfg="$(mktemp --suffix=.json)"
+            jq -n --arg ip "$SERVER_IP" --argjson port "$port" --arg id "$id" --arg flow "$flow" \
+                  --arg sni "$SNI" --arg pbk "$PUBLIC_KEY" --arg sid "$SHORT_ID" --argjson net "$net" '{
+                log: {loglevel: "none"},
+                inbounds: [{listen: "127.0.0.1", port: 10899, protocol: "socks"}],
+                outbounds: [{protocol: "vless",
+                  settings: {vnext: [{address: $ip, port: $port, users: [{id: $id, encryption: "none", flow: $flow}]}]},
+                  streamSettings: ($net + {security: "reality",
+                    realitySettings: {serverName: $sni, fingerprint: "chrome", publicKey: $pbk, shortId: $sid}})}]
+            }' > "$cfg"
+            "$XRAY" run -config "$cfg" >/dev/null 2>&1 & pid=$!
+            sleep 1.5
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -x socks5h://127.0.0.1:10899 https://www.google.com/generate_204 || true)"
+            kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true; rm -f "$cfg"
+            if [[ "$code" == 204 ]]; then echo "✅ $profile: سرور سالم است"; else echo "❌ $profile: سرور جواب درست نداد (کد: $code)"; fi
+        done
+
+        echo; echo "== آیا بسته‌ها از ایران به سرور می‌رسند؟ =="
+        command -v tcpdump >/dev/null || apt-get install -y -qq tcpdump >/dev/null
+        echo "👈 الان ۴۰ ثانیه وقت داری: فیلترشکن رو خاموش کن و توی Hiddify دکمه‌ی اتصال رو بزن..."
+        out="$(timeout 40 tcpdump -nni any -c 30 "tcp and (dst port $VISION_PORT or dst port $XHTTP_PORT) and not src host $SERVER_IP" 2>/dev/null || true)"
+        if [[ -n "$out" ]]; then
+            echo "✅ بسته رسید از:"
+            awk '{print $3, "->", $5}' <<<"$out" | sed 's/\.[0-9]* ->/ ->/' | sort | uniq -c | head
+        else
+            echo "❌ هیچ بسته‌ای نرسید؛ مسیر بین ایران و این پورت‌ها بسته است."
+        fi
         ;;
     status)
         systemctl --no-pager status xray | head -n 5
