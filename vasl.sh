@@ -22,6 +22,8 @@ usage() {
   sni-test <دامنه>...  بررسی مناسب بودن دامنه برای استتار REALITY
   autofix              امتحان خودکار دامنه‌های استتار تا وقتی سرور سالم شود
   sni <دامنه>          عوض کردن دامنه‌ی استتار
+  relay                دستور نصب سرور ایران (ریلی) را می‌دهد
+  relay-del            حذف لینک‌های ریلی از اشتراک
   sub                  نمایش لینک اشتراک هر کاربر (همه‌ی روش‌های اتصال در یک لینک)
   setup-extras         نصب/تعمیر Hysteria2، TUIC، تونل Cloudflare و سرور اشتراک
   diag                 عیب‌یابی کامل: تست سرور و بررسی رسیدن بسته‌ها از ایران
@@ -51,6 +53,7 @@ user_links() {
     local name="$1" id
     id="$(uuid_of "$name")"
     [[ -n "$id" ]] || die "کاربر «$name» وجود ندارد."
+    [[ ! -s "$RELAY_LINKS" ]] || cat "$RELAY_LINKS"
     local common="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
     echo "vless://$id@$SERVER_IP:$VISION_PORT?$common&flow=xtls-rprx-vision&type=tcp&headerType=none#vasl-$name-vision"
     if extras_installed; then
@@ -84,6 +87,10 @@ cdn_host() { curl -s --max-time 3 http://127.0.0.1:20241/quicktunnel 2>/dev/null
 sub_token() { printf '%s' "$1$SUB_SECRET" | sha256sum | cut -c1-24; }
 
 sub_url() { echo "http://$SERVER_IP:$SUB_PORT/sub/$(sub_token "$(uuid_of "$1")")"; }
+
+RELAY_LINKS="$XRAY_DIR/relay-links.txt"
+XRAY_ZIP=/usr/local/share/vasl/xray.zip
+relay_token() { printf '%s' "relay$SUB_SECRET" | sha256sum | cut -c1-24; }
 
 render_singbox() {
     extras_installed || return 0
@@ -126,6 +133,15 @@ setup_extras() {
     add_state WS_PORT 10000
     add_state WS_PATH "/$(openssl rand -hex 6)"
     load_state
+
+    echo "  - کپی Xray برای نصب روی سرور ایران (بدون نیاز به GitHub)"
+    ver="$("$XRAY" version | awk 'NR==1 {print $2}')"
+    if [[ ! -s "$XRAY_ZIP" ]] || ! unzip -p "$XRAY_ZIP" xray 2>/dev/null | cmp -s - "$XRAY"; then
+        mkdir -p "$(dirname "$XRAY_ZIP")"
+        local xarch=64; [[ $arch == arm64 ]] && xarch=arm64-v8a
+        curl -fsSL -o "$XRAY_ZIP" "https://github.com/XTLS/Xray-core/releases/download/v$ver/Xray-linux-$xarch.zip" \
+            || echo "  ⚠️ دانلود Xray برای ریلی ناموفق بود."
+    fi
 
     echo "  - sing-box (Hysteria2 + TUIC)"
     ver="$(gh_latest SagerNet/sing-box)"; ver="${ver#v}"; ver="${ver:-1.14.2}"
@@ -417,6 +433,47 @@ case "$cmd" in
             if [[ "$(sub_token "$(uuid_of "$u")")" == "$tok" ]]; then user_links "$u"; exit 0; fi
         done < <(users)
         exit 1
+        ;;
+    relay)
+        need_root; load_state
+        extras_installed || die "اول 'vasl setup-extras' را اجرا کنید."
+        [[ -n "$(uuid_of relay)" ]] || "$0" add relay >/dev/null
+        [[ -s "$XRAY_ZIP" ]] || die "فایل Xray برای ریلی آماده نیست؛ 'vasl setup-extras' را دوباره اجرا کنید."
+        echo "این دستور را روی سرور ایران (با root) اجرا کنید:"
+        echo
+        echo "  curl -fsSL http://$SERVER_IP:$SUB_PORT/relay/$(relay_token) | bash"
+        echo
+        echo "بعد از نصب، لینک ریلی خودکار به اول لینک اشتراک اضافه می‌شود."
+        ;;
+    relay-check)
+        load_state
+        [[ "${1:-}" == "$(relay_token)" ]]
+        ;;
+    relay-script)
+        load_state
+        [[ "${1:-}" == "$(relay_token)" ]] || exit 1
+        id="$(uuid_of relay)"; [[ -n "$id" ]] || exit 1
+        printf '#!/usr/bin/env bash\n'
+        printf 'DE_IP=%s\nDE_UUID=%s\nDE_PBK=%s\nDE_SID=%s\nDE_SNI=%s\n' "$SERVER_IP" "$id" "$PUBLIC_KEY" "$SHORT_ID" "$SNI"
+        printf 'DE_VPORT=%s\nDE_XPORT=%s\nDE_XPATH=%s\n' "$VISION_PORT" "$XHTTP_PORT" "$XHTTP_PATH"
+        printf 'BASE=http://%s:%s/relay/%s\n' "$SERVER_IP" "$SUB_PORT" "$1"
+        cat /usr/local/lib/vasl/relay.sh
+        ;;
+    relay-add)
+        load_state
+        link="${1:-}"
+        re='^vless://[0-9a-f-]{36}@[0-9A-Za-z.:-]+:[0-9]+\?[A-Za-z0-9=&%_./-]+#[A-Za-z0-9_.-]+$'
+        [[ "$link" =~ $re ]] || die "لینک نامعتبر است."
+        touch "$RELAY_LINKS"; chmod 600 "$RELAY_LINKS"
+        # هر سرور ایران (IP:پورت) فقط یک لینک دارد؛ لینک قبلی همان سرور جایگزین می‌شود
+        hostport="$(sed -E 's#^vless://[^@]+@([^?]+)\?.*#\1#' <<<"$link")"
+        grep -vF "@$hostport?" "$RELAY_LINKS" > "$RELAY_LINKS.tmp" || true
+        echo "$link" >> "$RELAY_LINKS.tmp"; mv "$RELAY_LINKS.tmp" "$RELAY_LINKS"
+        echo "ثبت شد."
+        ;;
+    relay-del)
+        need_root; load_state
+        rm -f "$RELAY_LINKS"; echo "همه‌ی لینک‌های ریلی از اشتراک حذف شدند."
         ;;
     sni)
         need_root; load_state

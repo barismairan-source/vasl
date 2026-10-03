@@ -48,11 +48,14 @@ XRAY=/usr/local/bin/xray
 
 install -m 0755 "$SCRIPT_DIR/vasl.sh" /usr/local/bin/vasl
 install -D -m 0755 "$SCRIPT_DIR/sub.py" /usr/local/lib/vasl/sub.py
+install -D -m 0644 "$SCRIPT_DIR/relay.sh" /usr/local/lib/vasl/relay.sh
+mkdir -p /usr/local/lib/vasl/assets && cp "$SCRIPT_DIR"/assets/* /usr/local/lib/vasl/assets/
 
 # بعد از نصب پایه، پروتکل‌های اضافه و لینک اشتراک را راه می‌اندازد
 finish() {
     info "راه‌اندازی پروتکل‌های اضافه (Hysteria2، TUIC، تونل Cloudflare) و لینک اشتراک..."
     vasl setup-extras
+    systemctl restart vasl-sub
     info "نصب تمام شد! 🎉"
     echo
     vasl sub
