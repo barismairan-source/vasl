@@ -34,6 +34,8 @@ KINDS = {
     "tuic": ("TUIC", "UDP", "پشتیبان Hysteria2"),
     "cdn": ("Cloudflare", "CDN", "وقتی IP سرور فیلتر شد"),
     "xhttp": ("XHTTP", "TCP", "فقط در v2rayN و v2rayNG"),
+    "cdnws": ("CDN دامنه‌ی شما", "WS", "از شبکه‌ی Cloudflare؛ در همه‌ی برنامه‌ها"),
+    "cdnxh": ("CDN دامنه‌ی شما", "XHTTP", "از شبکه‌ی Cloudflare؛ v2rayNG و Streisand"),
 }
 
 

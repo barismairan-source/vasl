@@ -22,6 +22,7 @@ usage() {
   sni-test <دامنه>...  بررسی مناسب بودن دامنه برای استتار REALITY
   autofix              امتحان خودکار دامنه‌های استتار تا وقتی سرور سالم شود
   sni <دامنه>          عوض کردن دامنه‌ی استتار
+  cdn <دامنه>          راه‌اندازی CDN کلادفلر با دامنه‌ی خودتان (WebSocket و XHTTP)
   relay                دستور نصب سرور ایران (ریلی) را می‌دهد
   relay-del            حذف لینک‌های ریلی از اشتراک
   sub                  نمایش لینک اشتراک هر کاربر (همه‌ی روش‌های اتصال در یک لینک)
@@ -57,9 +58,11 @@ user_links() {
     local common="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
     echo "vless://$id@$SERVER_IP:$VISION_PORT?$common&flow=xtls-rprx-vision&type=tcp&headerType=none#vasl-$name-vision"
     if extras_installed; then
-        echo "hysteria2://$id@$SERVER_IP:$HY2_PORT?sni=$HY2_SNI&insecure=1&alpn=h3&obfs=salamander&obfs-password=$OBFS_PASS#vasl-$name-hy2"
+        local pin; pin="$(openssl x509 -noout -fingerprint -sha256 -in "$CERT" 2>/dev/null | cut -d= -f2 | tr -d : | tr 'A-F' 'a-f')"
+        echo "hysteria2://$id@$SERVER_IP:$HY2_PORT?sni=$HY2_SNI&insecure=1&pinSHA256=$pin&alpn=h3&obfs=salamander&obfs-password=$OBFS_PASS#vasl-$name-hy2"
         echo "tuic://$id:$id@$SERVER_IP:$TUIC_PORT?congestion_control=bbr&alpn=h3&sni=$HY2_SNI&allow_insecure=1&insecure=1#vasl-$name-tuic"
         local host; host="$(cdn_host)"
+        cdn_links "$id" "$name"
         [[ -z "$host" ]] || echo "vless://$id@$host:443?encryption=none&security=tls&sni=$host&host=$host&fp=chrome&alpn=http%2F1.1&type=ws&path=$(urlencode "$WS_PATH")#vasl-$name-cdn"
     fi
     echo "vless://$id@$SERVER_IP:$XHTTP_PORT?$common&type=xhttp&path=$(urlencode "$XHTTP_PATH")&mode=auto#vasl-$name-xhttp"
@@ -226,6 +229,155 @@ EOF
 }
 # ---------------------------------------------------------------------------------------------
 
+# ---------- CDN با دامنه‌ی خود کاربر روی Cloudflare ----------
+CF_API="${CF_API:-https://api.cloudflare.com/client/v4}"
+CDN_CERT="$XRAY_DIR/cdn-cert.pem"
+CDN_KEY="$XRAY_DIR/cdn-key.pem"
+
+cf() {  # cf METHOD PATH [JSON]
+    local args=(-sS --max-time 20 -X "$1" -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json")
+    [[ -n "${3:-}" ]] && args+=(--data "$3")
+    curl "${args[@]}" "$CF_API$2"
+}
+
+cf_ok() { jq -e '.success == true' >/dev/null 2>&1; }
+
+# یک قانون به یک phase اضافه می‌کند، بدون دست زدن به قانون‌های قبلی کاربر
+cf_add_rule() {  # zone phase rule-json
+    local zone="$1" phase="$2" rule="$3" rs id desc
+    desc="$(jq -r .description <<<"$rule")"
+    rs="$(cf GET "/zones/$zone/rulesets/phases/$phase/entrypoint")"
+    if cf_ok <<<"$rs"; then
+        id="$(jq -r .result.id <<<"$rs")"
+        if jq -e --arg d "$desc" '.result.rules[]? | select(.description == $d)' <<<"$rs" >/dev/null; then
+            local rid; rid="$(jq -r --arg d "$desc" '.result.rules[] | select(.description == $d) | .id' <<<"$rs" | head -1)"
+            cf PATCH "/zones/$zone/rulesets/$id/rules/$rid" "$rule" | cf_ok
+        else
+            cf POST "/zones/$zone/rulesets/$id/rules" "$rule" | cf_ok
+        fi
+    else
+        cf POST "/zones/$zone/rulesets" \
+            "$(jq -nc --arg p "$phase" --argjson r "$rule" '{name: "vasl", kind: "zone", phase: $p, rules: [$r]}')" | cf_ok
+    fi
+}
+
+cdn_links() {  # $1 = uuid, $2 = name
+    [[ -n "${CDN_HOST:-}" ]] || return 0
+    local q="encryption=none&security=tls&sni=$CDN_HOST&host=$CDN_HOST&fp=chrome"
+    echo "vless://$1@$CDN_HOST:$CDN_WS_EDGE?$q&alpn=http%2F1.1&type=ws&path=$(urlencode "$CDN_WS_PATH")#vasl-$2-cdnws"
+    echo "vless://$1@$CDN_XH_HOST:$CDN_XH_EDGE?${q//$CDN_HOST/$CDN_XH_HOST}&alpn=h2&type=xhttp&path=$(urlencode "$CDN_XH_PATH")&mode=auto#vasl-$2-cdnxh"
+}
+
+cdn_probe() {  # از خود سرور، از مسیر Cloudflare به خودش وصل می‌شود
+    local kind="$1" id cfg pid code ob
+    id="$(uuid_of "$(users | head -1)")"
+    if [[ $kind == ws ]]; then
+        ob="$(jq -n --arg h "$CDN_HOST" --argjson p "$CDN_WS_EDGE" --arg id "$id" --arg path "$CDN_WS_PATH" '{protocol: "vless",
+            settings: {vnext: [{address: $h, port: $p, users: [{id: $id, encryption: "none"}]}]},
+            streamSettings: {network: "ws", wsSettings: {path: $path, host: $h}, security: "tls",
+              tlsSettings: {serverName: $h, fingerprint: "chrome", alpn: ["http/1.1"]}}}')"
+    else
+        ob="$(jq -n --arg h "$CDN_XH_HOST" --argjson p "$CDN_XH_EDGE" --arg id "$id" --arg path "$CDN_XH_PATH" '{protocol: "vless",
+            settings: {vnext: [{address: $h, port: $p, users: [{id: $id, encryption: "none"}]}]},
+            streamSettings: {network: "xhttp", xhttpSettings: {path: $path, host: $h, mode: "auto"}, security: "tls",
+              tlsSettings: {serverName: $h, fingerprint: "chrome", alpn: ["h2"]}}}')"
+    fi
+    cfg="$(mktemp --suffix=.json)"
+    jq -n --argjson ob "$ob" '{log: {loglevel: "none"},
+        inbounds: [{listen: "127.0.0.1", port: 10897, protocol: "socks", settings: {auth: "noauth"}}], outbounds: [$ob]}' > "$cfg"
+    "$XRAY" run -config "$cfg" >/dev/null 2>&1 & pid=$!
+    sleep 2
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -x socks5h://127.0.0.1:10897 https://www.google.com/generate_204 || true)"
+    kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f "$cfg"
+    [[ "$code" == 204 ]]
+}
+
+setup_cdn() {
+    local domain="$1" zone rs rec body tmp ok_ws=0 ok_xh=0
+    [[ "$domain" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]] || die "دامنه نامعتبر است: $domain"
+    if [[ -z "${CF_TOKEN:-}" ]]; then
+        read -rsp "توکن API کلادفلر را paste کنید (نمایش داده نمی‌شود): " CF_TOKEN </dev/tty; echo
+    fi
+    [[ -n "$CF_TOKEN" ]] || die "توکن خالی است."
+
+    echo "  - پیدا کردن دامنه در Cloudflare..."
+    zone="$(cf GET "/zones?name=$domain" | jq -r '.result[0].id // empty')"
+    [[ -n "$zone" ]] || die "دامنه پیدا نشد یا توکن به آن دسترسی ندارد."
+
+    add_state CDN_HOST "static-$(openssl rand -hex 3).$domain"
+    add_state CDN_XH_HOST "img-$(openssl rand -hex 3).$domain"
+    add_state CDN_WS_PORT 2053
+    add_state CDN_XH_PORT 2083
+    add_state CDN_WS_PATH "/$(openssl rand -hex 8)"
+    add_state CDN_XH_PATH "/$(openssl rand -hex 8)"
+    add_state CDN_WS_EDGE 2053
+    add_state CDN_XH_EDGE 2083
+    load_state
+
+    echo "  - رکوردهای DNS (فقط زیردامنه‌های جدید؛ رکوردهای فعلی دست نمی‌خورند)"
+    for h in "$CDN_HOST" "$CDN_XH_HOST"; do
+        body="$(jq -nc --arg n "$h" --arg ip "$SERVER_IP" '{type: "A", name: $n, content: $ip, proxied: true, ttl: 1, comment: "vasl"}')"
+        rec="$(cf GET "/zones/$zone/dns_records?name=$h" | jq -r '.result[0].id // empty')"
+        if [[ -n "$rec" ]]; then cf PUT "/zones/$zone/dns_records/$rec" "$body" | cf_ok
+        else cf POST "/zones/$zone/dns_records" "$body" | cf_ok; fi || die "ساخت رکورد DNS ناموفق بود (دسترسی DNS:Edit توکن را چک کنید)."
+    done
+
+    echo "  - SSL روی Full فقط برای همین دو زیردامنه"
+    for h in "$CDN_HOST" "$CDN_XH_HOST"; do
+        cf_add_rule "$zone" http_config_settings "$(jq -nc --arg h "$h" '{action: "set_config", enabled: true,
+            description: ("vasl ssl " + $h), expression: ("http.host eq \"" + $h + "\""), action_parameters: {ssl: "full"}}')" \
+            || echo "  ⚠️ قانون SSL ساخته نشد؛ اگر وصل نشد، در Cloudflare حالت SSL/TLS را روی Full بگذارید."
+    done
+
+    echo "  - پورت ۴۴۳ کلادفلر ← پورت‌های داخلی سرور (Origin Rules)"
+    if cf_add_rule "$zone" http_request_origin "$(jq -nc --arg h "$CDN_HOST" --argjson p "$CDN_WS_PORT" '{action: "route", enabled: true,
+            description: ("vasl port " + $h), expression: ("http.host eq \"" + $h + "\""), action_parameters: {origin: {port: $p}}}')" \
+       && cf_add_rule "$zone" http_request_origin "$(jq -nc --arg h "$CDN_XH_HOST" --argjson p "$CDN_XH_PORT" '{action: "route", enabled: true,
+            description: ("vasl port " + $h), expression: ("http.host eq \"" + $h + "\""), action_parameters: {origin: {port: $p}}}')"; then
+        sed -i 's/^CDN_WS_EDGE=.*/CDN_WS_EDGE=443/; s/^CDN_XH_EDGE=.*/CDN_XH_EDGE=443/' "$STATE"
+    else
+        echo "  ⚠️ Origin Rule ساخته نشد؛ از پورت‌های 2053 و 2083 کلادفلر استفاده می‌شود."
+        sed -i "s/^CDN_WS_EDGE=.*/CDN_WS_EDGE=$CDN_WS_PORT/; s/^CDN_XH_EDGE=.*/CDN_XH_EDGE=$CDN_XH_PORT/" "$STATE"
+    fi
+    load_state
+
+    echo "  - ورودی‌های Xray برای CDN (TLS + WebSocket و TLS + XHTTP)"
+    install -m 0644 "$CERT" "$CDN_CERT"
+    install -m 0600 -o nobody "$CERT_KEY" "$CDN_KEY" 2>/dev/null || install -m 0644 "$CERT_KEY" "$CDN_KEY"
+    tmp="$(mktemp --suffix=.json)"
+    jq --argjson wp "$CDN_WS_PORT" --argjson xp "$CDN_XH_PORT" --arg wpath "$CDN_WS_PATH" --arg xpath "$CDN_XH_PATH" \
+       --arg cert "$CDN_CERT" --arg key "$CDN_KEY" '
+        def tls($alpn): {certificates: [{certificateFile: $cert, keyFile: $key}], alpn: $alpn};
+        def clients: [.inbounds[] | select(.tag == "xhttp") | .settings.clients[]];
+        clients as $c
+        | .inbounds |= map(select(.tag != "cdn-ws" and .tag != "cdn-xh"))
+        | .inbounds += [
+            {tag: "cdn-ws", listen: "0.0.0.0", port: $wp, protocol: "vless",
+             settings: {clients: $c, decryption: "none"},
+             streamSettings: {network: "ws", wsSettings: {path: $wpath}, security: "tls", tlsSettings: tls(["http/1.1"])},
+             sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}},
+            {tag: "cdn-xh", listen: "0.0.0.0", port: $xp, protocol: "vless",
+             settings: {clients: $c, decryption: "none"},
+             streamSettings: {network: "xhttp", xhttpSettings: {path: $xpath, mode: "auto"}, security: "tls", tlsSettings: tls(["h2", "http/1.1"])},
+             sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}}]' "$CONFIG" > "$tmp"
+    apply_config "$tmp"
+    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow "$CDN_WS_PORT/tcp" >/dev/null; ufw allow "$CDN_XH_PORT/tcp" >/dev/null
+    fi
+
+    echo "  - تست کامل از مسیر Cloudflare (تا ۹۰ ثانیه برای فعال شدن DNS)..."
+    for _ in $(seq 1 9); do
+        [[ $ok_ws == 1 ]] || { cdn_probe ws && ok_ws=1; }
+        [[ $ok_xh == 1 ]] || { cdn_probe xh && ok_xh=1; }
+        [[ $ok_ws == 1 && $ok_xh == 1 ]] && break
+        sleep 8
+    done
+    [[ $ok_ws == 1 ]] && echo "  ✅ CDN WebSocket کار می‌کند" || echo "  ❌ CDN WebSocket هنوز جواب نمی‌دهد"
+    [[ $ok_xh == 1 ]] && echo "  ✅ CDN XHTTP کار می‌کند" || echo "  ❌ CDN XHTTP هنوز جواب نمی‌دهد"
+    unset CF_TOKEN
+}
+# -------------------------------------------------------------
+
 # سرور را از داخل خودش با یک کلاینت واقعی Xray تست می‌کند
 SELFTEST_LOG=/tmp/vasl-selftest.log
 selftest() {
@@ -291,7 +443,7 @@ case "$cmd" in
         tmp="$(mktemp --suffix=.json)"
         jq --arg id "$id" --arg u "$name" '
             (.inbounds[] | select(.tag=="vision") | .settings.clients) += [{id: $id, flow: "xtls-rprx-vision", email: $u}]
-          | (.inbounds[] | select(.tag=="xhttp" or .tag=="ws") | .settings.clients) += [{id: $id, email: $u}]
+          | (.inbounds[] | select(.tag=="xhttp" or .tag=="ws" or .tag=="cdn-ws" or .tag=="cdn-xh") | .settings.clients) += [{id: $id, email: $u}]
         ' "$CONFIG" > "$tmp"
         apply_config "$tmp"
         render_singbox
@@ -433,6 +585,13 @@ case "$cmd" in
             if [[ "$(sub_token "$(uuid_of "$u")")" == "$tok" ]]; then user_links "$u"; exit 0; fi
         done < <(users)
         exit 1
+        ;;
+    cdn)
+        need_root; load_state
+        extras_installed || die "اول 'vasl setup-extras' را اجرا کنید."
+        [[ -n "${1:-}" ]] || die "دامنه را بدهید: vasl cdn example.com"
+        setup_cdn "$1"
+        echo; echo "لینک‌های CDN به لینک اشتراک اضافه شدند. در برنامه «به‌روزرسانی اشتراک» را بزنید."
         ;;
     relay)
         need_root; load_state

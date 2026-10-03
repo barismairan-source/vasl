@@ -31,6 +31,23 @@ VPN شخصی روی سرور خودتان، با **Xray-core** و پروتکل *
 
 > آدرس تونل Cloudflare (`*.trycloudflare.com`) با هر ری‌استارت عوض می‌شود، ولی لینک اشتراک همیشه آدرس جدید را می‌دهد؛ فقط در برنامه «Update subscription» را بزنید.
 
+## CDN با دامنه‌ی خودتان (Cloudflare)
+
+اگر دامنه‌ای روی Cloudflare دارید، یک دستور همه‌چیز را می‌سازد:
+
+```bash
+sudo vasl cdn example.com
+```
+
+توکن API را می‌پرسد (نمایش داده نمی‌شود و جایی ذخیره نمی‌شود)، بعد:
+- دو **زیردامنه‌ی جدید** با ابر نارنجی می‌سازد. رکوردهای فعلی دامنه دست نمی‌خورند.
+- فقط برای همین دو زیردامنه SSL را روی Full می‌گذارد و پورت ۴۴۳ کلادفلر را به پورت‌های داخلی سرور می‌فرستد (Configuration Rule و Origin Rule).
+- دو روش اضافه می‌کند: **VLESS + WebSocket** (همه‌ی برنامه‌ها) و **VLESS + XHTTP** (v2rayNG و Streisand).
+- کل مسیر را از طریق Cloudflare تست می‌کند.
+
+**ساخت توکن:** Cloudflare → My Profile → API Tokens → Create Token → Create Custom Token، با این دسترسی‌ها روی همان دامنه:
+`Zone → DNS → Edit`، `Zone → Config Rules → Edit`، `Zone → Origin Rules → Edit`، `Zone → Zone → Read`
+
 ## ریلی ایران (وقتی اتصال مستقیم به سرور خارج بسته است)
 
 در ۲۰۲۶ اینترنت ایران عملاً «لیست سفید» شده و همراه اول REALITY به سرورهای خارجی را گسترده می‌بندد. راه‌حل رایج، **سرور ایران به‌عنوان ریلی** است:
@@ -114,6 +131,7 @@ sudo vasl add mom      # کاربر جدید (برای هر نفر/دستگاه 
 sudo vasl del mom      # حذف کاربر
 vasl sub               # لینک اشتراک هر کاربر (همه‌ی روش‌ها)
 sudo vasl relay        # دستور نصب سرور ایران (ریلی)
+sudo vasl cdn دامنه    # CDN کلادفلر با دامنه‌ی خودتان
 vasl links             # همه‌ی لینک‌ها
 vasl qr mom            # QR Code
 sudo vasl diag         # عیب‌یابی کامل وقتی وصل نمیشه
