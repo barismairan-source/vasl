@@ -23,6 +23,7 @@ VASL = "/usr/local/bin/vasl"
 ASSETS = "/usr/local/lib/vasl/assets"
 XRAY_ZIP = "/usr/local/share/vasl/xray.zip"
 SUB_RE = re.compile(r"^/sub/([0-9a-f]{24})/?$")
+CDNIPS_RE = re.compile(r"^/sub/([0-9a-f]{24})/cdn-ips$")
 RELAY_RE = re.compile(r"^/relay/([0-9a-f]{24})(/xray\.zip|/register)?$")
 FONTS = {"Vazirmatn-Regular.woff2", "Vazirmatn-Bold.woff2"}
 
@@ -107,11 +108,70 @@ function cp(text, b) {
 """
 
 
+SCANNER = """
+<h2>پیدا کردن IP تمیز Cloudflare</h2>
+<div class="card">
+  <p class="note" style="margin:0 0 8px">اگر روش‌های CDN وصل نمی‌شوند، احتمالاً IPهای Cloudflare روی اینترنت شما فیلترند.
+  <b>فیلترشکن را خاموش کنید</b> و دکمه را بزنید؛ این صفحه IPهای سالم را از اینترنت خود شما پیدا و در اشتراک ذخیره می‌کند.</p>
+  <button class="btn" id="scanBtn" onclick="scan()">شروع اسکن</button>
+  <p class="note" id="scanStatus" style="margin:10px 0 0"></p>
+  <div id="scanResult"></div>
+</div>
+"""
+
+SCANNER_JS = r"""
+const CF = ['104.16.0.0/13','104.24.0.0/14','172.64.0.0/13','162.158.0.0/15','188.114.96.0/20','141.101.64.0/18',
+  '108.162.192.0/18','173.245.48.0/20','190.93.240.0/20','198.41.128.0/17','197.234.240.0/22','103.21.244.0/22',
+  '103.22.200.0/22','103.31.4.0/22','131.0.72.0/22'];
+function rndIp() {
+  const [base, bits] = CF[Math.floor(Math.random() * CF.length)].split('/');
+  const b = base.split('.').reduce((a, o) => (a << 8) + +o, 0) >>> 0;
+  const n = (b + Math.floor(Math.random() * 2 ** (32 - bits))) >>> 0;
+  if ((n & 255) === 0 || (n & 255) === 255) return rndIp();
+  return [n >>> 24, (n >> 16) & 255, (n >> 8) & 255, n & 255].join('.');
+}
+async function probe(ip) {
+  const c = new AbortController(), t0 = performance.now(), tm = setTimeout(() => c.abort(), 2200);
+  try { await fetch('https://' + ip + '/cdn-cgi/trace?' + Math.random(), {mode: 'no-cors', cache: 'no-store', signal: c.signal}); }
+  catch (e) { if (c.signal.aborted) return null; }
+  finally { clearTimeout(tm); }
+  return Math.round(performance.now() - t0);
+}
+async function scan() {
+  const btn = document.getElementById('scanBtn'), st = document.getElementById('scanStatus'), out = document.getElementById('scanResult');
+  btn.disabled = true; out.innerHTML = '';
+  const seen = new Set(), good = []; let tested = 0; const total = 240;
+  const worker = async () => {
+    while (tested < total && good.length < 12) {
+      let ip; do { ip = rndIp(); } while (seen.has(ip)); seen.add(ip); tested++;
+      const a = await probe(ip); if (a === null) continue;
+      const b = await probe(ip); if (b === null) continue;
+      good.push([ip, Math.min(a, b)]);
+      st.textContent = `تست شد: ${tested} — سالم: ${good.length}`;
+    }
+  };
+  st.textContent = 'در حال اسکن…';
+  await Promise.all(Array.from({length: 6}, worker));
+  good.sort((x, y) => x[1] - y[1]);
+  if (!good.length) { st.textContent = `هیچ IP سالمی پیدا نشد (${tested} تست). اینترنت دیگری را امتحان کنید.`; btn.disabled = false; return; }
+  const best = good.slice(0, 5).map(g => g[0]);
+  out.innerHTML = '<div class="mono" style="margin-top:10px">' + good.slice(0, 8).map(g => `${g[0]}  —  ${g[1]}ms`).join('<br>') + '</div>';
+  st.textContent = 'در حال ذخیره در اشتراک…';
+  const r = await fetch(location.pathname.replace(/\/$/, '') + '/cdn-ips', {method: 'POST', body: JSON.stringify(best)});
+  st.textContent = r.ok ? `✓ ${best.length} IP تمیز ذخیره شد. در برنامه «به‌روزرسانی اشتراک» را بزنید و روش‌های «IP تمیز» را امتحان کنید.`
+                        : 'ذخیره ناموفق بود.';
+  btn.disabled = false; btn.textContent = 'اسکن دوباره';
+}
+"""
+
+
 def render_page(sub_url, links):
     cards = []
     for i, link in enumerate(links, 1):
-        kind = link.rsplit("-", 1)[-1]
+        kind, _, ipn = link.rsplit("-", 1)[-1].partition("_ip")
         title, tag, desc = KINDS.get(kind, (kind, "", ""))
+        if ipn:
+            title, desc = f"{title} — IP تمیز {ipn}", "IPی که اسکنر از اینترنت خودتان پیدا کرده"
         esc = html.escape(link)
         cards.append(f"""
 <details class="card">
@@ -123,6 +183,7 @@ def render_page(sub_url, links):
   <button class="btn ghost" onclick='cp({html.escape(json.dumps(link))}, this)'>کپی این کانفیگ</button>
 </details>""")
     s = html.escape(sub_url)
+    scanner = SCANNER if any("-cdn" in l for l in links) else ""
     hiddify = html.escape("hiddify://import/" + sub_url + "#vasl")
     return f"""<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
@@ -148,9 +209,10 @@ def render_page(sub_url, links):
   <li>اگر یک روش قطع شد، در برنامه «به‌روزرسانی اشتراک» را بزنید.</li>
 </ol></div>
 
+{scanner}
 <h2>روش‌های اتصال</h2>
 {''.join(cards)}
-</main><script>{JS}</script></body></html>"""
+</main><script>{JS}{SCANNER_JS if scanner else ""}</script></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -202,6 +264,15 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def do_POST(self):
+        m = CDNIPS_RE.match(self.path.split("?")[0])
+        if m:
+            length = min(int(self.headers.get("Content-Length") or 0), 2048)
+            try:
+                ips = [str(i) for i in json.loads(self.rfile.read(length))][:5]
+            except (ValueError, TypeError):
+                return self.send_error(400)
+            ok = vasl("cdn-ips", m.group(1), *ips) is not None
+            return self.send(200 if ok else 400, b"ok\n" if ok else b"bad\n", "text/plain")
         m = RELAY_RE.match(self.path.split("?")[0])
         if not m or m.group(2) != "/register" or vasl("relay-check", m.group(1)) is None:
             return self.send_error(404)

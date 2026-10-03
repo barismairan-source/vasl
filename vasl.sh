@@ -264,9 +264,18 @@ cf_add_rule() {  # zone phase rule-json
 
 cdn_links() {  # $1 = uuid, $2 = name
     [[ -n "${CDN_HOST:-}" ]] || return 0
-    local q="encryption=none&security=tls&sni=$CDN_HOST&host=$CDN_HOST&fp=chrome"
-    echo "vless://$1@$CDN_HOST:$CDN_WS_EDGE?$q&alpn=http%2F1.1&type=ws&path=$(urlencode "$CDN_WS_PATH")#vasl-$2-cdnws"
-    echo "vless://$1@$CDN_XH_HOST:$CDN_XH_EDGE?${q//$CDN_HOST/$CDN_XH_HOST}&alpn=h2&type=xhttp&path=$(urlencode "$CDN_XH_PATH")&mode=auto#vasl-$2-cdnxh"
+    local q="encryption=none&security=tls&sni=$CDN_HOST&host=$CDN_HOST&fp=chrome" qx i=0 ip
+    qx="${q//$CDN_HOST/$CDN_XH_HOST}"
+    local ws="alpn=http%2F1.1&type=ws&path=$(urlencode "$CDN_WS_PATH")"
+    local xh="alpn=h2&type=xhttp&path=$(urlencode "$CDN_XH_PATH")&mode=auto"
+    # IPهای تمیزی که اسکنر صفحه‌ی اشتراک از اینترنت خود کاربر پیدا کرده
+    for ip in ${CDN_IPS:-}; do
+        i=$((i + 1))
+        echo "vless://$1@$ip:$CDN_WS_EDGE?$q&$ws#vasl-$2-cdnws_ip$i"
+        echo "vless://$1@$ip:$CDN_XH_EDGE?$qx&$xh#vasl-$2-cdnxh_ip$i"
+    done
+    echo "vless://$1@$CDN_HOST:$CDN_WS_EDGE?$q&$ws#vasl-$2-cdnws"
+    echo "vless://$1@$CDN_XH_HOST:$CDN_XH_EDGE?$qx&$xh#vasl-$2-cdnxh"
 }
 
 cdn_probe() {  # از خود سرور، از مسیر Cloudflare به خودش وصل می‌شود
@@ -606,6 +615,22 @@ case "$cmd" in
         echo "  curl -fsSL http://$SERVER_IP:$SUB_PORT/relay/$(relay_token) | bash"
         echo
         echo "بعد از نصب، لینک ریلی خودکار به اول لینک اشتراک اضافه می‌شود."
+        ;;
+    cdn-ips)
+        load_state
+        tok="${1:-}"; shift || true
+        found=0
+        while read -r u; do [[ "$(sub_token "$(uuid_of "$u")")" == "$tok" ]] && found=1; done < <(users)
+        [[ $found == 1 ]] || exit 1
+        ips=""
+        for ip in "$@"; do
+            [[ "$ip" =~ ^(104|108|141|162|172|173|188|190|197|198|103|131)\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || die "IP نامعتبر: $ip"
+            ips="$ips $ip"
+        done
+        ips="$(xargs -n1 <<<"$ips" | sed -n 1,5p | xargs)"
+        sed -i '/^CDN_IPS=/d' "$STATE"
+        [[ -z "$ips" ]] || echo "CDN_IPS=\"$ips\"" >> "$STATE"
+        echo "ok"
         ;;
     relay-check)
         load_state
