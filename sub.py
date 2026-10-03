@@ -10,6 +10,7 @@
 کانفیگ‌ها هر بار از `vasl` ساخته می‌شوند، پس همیشه به‌روزند.
 """
 import base64
+import gzip
 import html
 import json
 import os
@@ -23,7 +24,7 @@ VASL = "/usr/local/bin/vasl"
 ASSETS = "/usr/local/lib/vasl/assets"
 XRAY_ZIP = "/usr/local/share/vasl/xray.zip"
 SUB_RE = re.compile(r"^/sub/([0-9a-f]{24})/?$")
-QR_RE = re.compile(r"^/sub/([0-9a-f]{24})/qr/([0-9]{1,2})$")
+QR_RE = re.compile(r"^/sub/([0-9a-f]{24})/qr/([0-9]{1,2}|sub)$")
 CDNIPS_RE = re.compile(r"^/sub/([0-9a-f]{24})/cdn-ips$")
 RELAY_RE = re.compile(r"^/relay/([0-9a-f]{24})(/xray\.zip|/register)?$")
 FONTS = {"Vazirmatn-Regular.woff2", "Vazirmatn-Bold.woff2"}
@@ -60,8 +61,6 @@ def qr_svg(text):
 
 
 CSS = """
-@font-face { font-family: Vazirmatn; src: url(/static/Vazirmatn-Regular.woff2) format("woff2"); font-weight: 400; font-display: swap; }
-@font-face { font-family: Vazirmatn; src: url(/static/Vazirmatn-Bold.woff2) format("woff2"); font-weight: 700; font-display: swap; }
 :root {
   --bg: #f4f5f7; --surface: #ffffff; --fg: #15171a; --muted: #5f6672; --line: #e3e6ea;
   --accent: #2f6fed; --accent-fg: #ffffff; --soft: #eaf0fe; --ok: #138a52;
@@ -72,7 +71,7 @@ CSS = """
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg);
-       font: 16px/1.8 Vazirmatn, Tahoma, sans-serif; -webkit-text-size-adjust: 100%; }
+       font: 16px/1.8 Vazirmatn, "SF Arabic", "Geeza Pro", Tahoma, sans-serif; -webkit-text-size-adjust: 100%; }
 main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; }
 header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .logo { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: var(--accent-fg);
@@ -196,7 +195,8 @@ def render_page(sub_url, links):
     return f"""<!doctype html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>وصل</title><style>{CSS}</style></head>
+<meta name="robots" content="noindex"><title>وصل</title><style>{CSS}</style>
+<script>{JS}{SCANNER_JS if scanner else ""}</script></head>
 <body><main>
 <header><div class="logo">و</div><div><h1>وصل</h1><p class="sub">اتصال شخصی شما — {len(links)} روش در یک لینک</p></div></header>
 
@@ -206,7 +206,7 @@ def render_page(sub_url, links):
   <div class="mono">{s}</div>
   <a class="btn" href="{hiddify}">افزودن به Hiddify</a>
   <button class="btn ghost" onclick='cp({html.escape(json.dumps(sub_url))}, this)'>کپی لینک اشتراک</button>
-  <div class="qr">{qr_svg(sub_url)}</div>
+  <details ontoggle="loadQr(this)"><summary class="note" style="margin-top:12px">نمایش QR Code</summary><div class="qr" data-i="sub"></div></details>
 </div>
 
 <h2>راه‌اندازی</h2>
@@ -220,7 +220,7 @@ def render_page(sub_url, links):
 {scanner}
 <h2>روش‌های اتصال</h2>
 {''.join(cards)}
-</main><script>{JS}{SCANNER_JS if scanner else ""}</script></body></html>"""
+</main></body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -228,7 +228,12 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def send(self, code, body, ctype, extra=None):
+        gz = len(body) > 512 and ctype.startswith(("text/", "image/svg")) and "gzip" in self.headers.get("Accept-Encoding", "")
+        if gz:
+            body = gzip.compress(body, 9)
         self.send_response(code)
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -250,6 +255,11 @@ class Handler(BaseHTTPRequestHandler):
         m = QR_RE.match(path)
         if m:
             links = [l.strip() for l in (vasl("sub-links", m.group(1)) or "").splitlines() if "://" in l]
+            if not links:
+                return self.send_error(404)
+            if m.group(2) == "sub":
+                host = self.headers.get("Host") or f"localhost:{PORT}"
+                return self.send(200, qr_svg(f"http://{host}/sub/{m.group(1)}").encode(), "image/svg+xml")
             i = int(m.group(2))
             return self.send(200, qr_svg(links[i]).encode(), "image/svg+xml") if i < len(links) else self.send_error(404)
 
