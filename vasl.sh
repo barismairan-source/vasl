@@ -296,9 +296,11 @@ setup_cdn() {
     local domain="$1" zone rs rec body tmp ok_ws=0 ok_xh=0
     [[ "$domain" =~ ^[a-z0-9.-]+\.[a-z]{2,}$ ]] || die "دامنه نامعتبر است: $domain"
     if [[ -z "${CF_TOKEN:-}" ]]; then
-        read -rsp "توکن API کلادفلر را paste کنید (نمایش داده نمی‌شود): " CF_TOKEN </dev/tty; echo
+        printf 'توکن API کلادفلر را paste کنید و Enter بزنید (نمایش داده نمی‌شود): ' >&2
+        if [[ -t 0 ]]; then read -rs CF_TOKEN || true; else read -rs CF_TOKEN </dev/tty || true; fi
+        echo >&2
     fi
-    [[ -n "$CF_TOKEN" ]] || die "توکن خالی است."
+    [[ -n "${CF_TOKEN:-}" ]] || die "توکن خالی است. می‌توانید این‌طور هم اجرا کنید: CF_TOKEN='توکن' vasl cdn $domain"
 
     echo "  - پیدا کردن دامنه در Cloudflare..."
     zone="$(cf GET "/zones?name=$domain" | jq -r '.result[0].id // empty')"
