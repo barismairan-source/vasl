@@ -23,12 +23,14 @@ VASL = "/usr/local/bin/vasl"
 ASSETS = "/usr/local/lib/vasl/assets"
 XRAY_ZIP = "/usr/local/share/vasl/xray.zip"
 SUB_RE = re.compile(r"^/sub/([0-9a-f]{24})/?$")
+QR_RE = re.compile(r"^/sub/([0-9a-f]{24})/qr/([0-9]{1,2})$")
 CDNIPS_RE = re.compile(r"^/sub/([0-9a-f]{24})/cdn-ips$")
 RELAY_RE = re.compile(r"^/relay/([0-9a-f]{24})(/xray\.zip|/register)?$")
 FONTS = {"Vazirmatn-Regular.woff2", "Vazirmatn-Bold.woff2"}
 
 # برچسب هر روش بر اساس انتهای نام کانفیگ (#vasl-<user>-<kind>)
 KINDS = {
+    "ssh": ("تونل SSH", "SSH", "وقتی فقط SSH باز است؛ در Hiddify و مک"),
     "relay": ("ریلی ایران", "Iran → DE", "اول این را امتحان کنید؛ گوشی فقط به سرور داخلی وصل می‌شود"),
     "vision": ("REALITY", "TCP", "روش اصلی؛ شبیه بازدید از یک سایت معمولی"),
     "hy2": ("Hysteria2", "UDP", "خیلی سریع؛ اگر اپراتور UDP را نبندد"),
@@ -99,6 +101,12 @@ ol { padding-inline-start: 20px; margin: 0; } li { margin: 4px 0; }
 """
 
 JS = """
+function loadQr(d) {
+  const q = d.querySelector('.qr[data-i]');
+  if (!d.open || !q || q.dataset.done) return;
+  q.dataset.done = 1; q.textContent = '…';
+  fetch(location.pathname.replace(/\/$/, '') + '/qr/' + q.dataset.i).then(r => r.text()).then(t => q.innerHTML = t);
+}
 function cp(text, b) {
   const done = () => { const o = b.textContent; b.textContent = '✓ کپی شد'; setTimeout(() => b.textContent = o, 1500); };
   if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(done); return; }
@@ -174,11 +182,11 @@ def render_page(sub_url, links):
             title, desc = f"{title} — IP تمیز {ipn}", "IPی که اسکنر از اینترنت خودتان پیدا کرده"
         esc = html.escape(link)
         cards.append(f"""
-<details class="card">
+<details class="card" ontoggle="loadQr(this)">
   <summary><span class="num">{i}</span>
     <span class="meta"><b>{html.escape(title)}</b><span>{html.escape(desc)}</span></span>
     <span class="tag">{html.escape(tag)}</span></summary>
-  <div class="qr">{qr_svg(link)}</div>
+  <div class="qr" data-i="{i - 1}"></div>
   <div class="mono" style="margin-top:12px">{esc}</div>
   <button class="btn ghost" onclick='cp({html.escape(json.dumps(link))}, this)'>کپی این کانفیگ</button>
 </details>""")
@@ -238,6 +246,12 @@ class Handler(BaseHTTPRequestHandler):
                 with open(os.path.join(ASSETS, name), "rb") as f:
                     return self.send(200, f.read(), "font/woff2", {"Cache-Control": "max-age=2592000"})
             return self.send_error(404)
+
+        m = QR_RE.match(path)
+        if m:
+            links = [l.strip() for l in (vasl("sub-links", m.group(1)) or "").splitlines() if "://" in l]
+            i = int(m.group(2))
+            return self.send(200, qr_svg(links[i]).encode(), "image/svg+xml") if i < len(links) else self.send_error(404)
 
         m = RELAY_RE.match(path)
         if m and m.group(2) != "/register":

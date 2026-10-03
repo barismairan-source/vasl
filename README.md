@@ -31,6 +31,18 @@ VPN شخصی روی سرور خودتان، با **Xray-core** و پروتکل *
 
 > آدرس تونل Cloudflare (`*.trycloudflare.com`) با هر ری‌استارت عوض می‌شود، ولی لینک اشتراک همیشه آدرس جدید را می‌دهد؛ فقط در برنامه «Update subscription» را بزنید.
 
+## تونل SSH (وقتی فقط SSH باز است)
+
+```bash
+sudo vasl ssh
+```
+یک کاربر جدا و محدود (`vasl-tunnel`) می‌سازد که فقط می‌تواند تونل بزند، نه وارد سرور شود. لینک `ssh://` به اشتراک اضافه می‌شود (Hiddify) و دستور آماده برای مک هم چاپ می‌شود:
+
+```bash
+ssh -N -D 1080 vasl-tunnel@IP_SERVER
+```
+بعد در مک: System Settings → Network → Wi-Fi → Details → Proxies → SOCKS proxy = `127.0.0.1:1080`.
+
 ## CDN با دامنه‌ی خودتان (Cloudflare)
 
 اگر دامنه‌ای روی Cloudflare دارید، یک دستور همه‌چیز را می‌سازد:
@@ -132,6 +144,7 @@ sudo vasl del mom      # حذف کاربر
 vasl sub               # لینک اشتراک هر کاربر (همه‌ی روش‌ها)
 sudo vasl relay        # دستور نصب سرور ایران (ریلی)
 sudo vasl cdn دامنه    # CDN کلادفلر با دامنه‌ی خودتان
+sudo vasl ssh          # تونل SSH با کاربر محدود
 vasl links             # همه‌ی لینک‌ها
 vasl qr mom            # QR Code
 sudo vasl diag         # عیب‌یابی کامل وقتی وصل نمیشه

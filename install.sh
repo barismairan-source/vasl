@@ -166,7 +166,7 @@ sysctl --system >/dev/null 2>&1 || warn "اعمال تنظیمات sysctl کام
 if [[ "$SKIP_FIREWALL" != "1" ]]; then
     info "تنظیم فایروال (ufw)..."
     apt-get install -y -qq ufw >/dev/null
-    SSH_PORT="$(ss -tlnp 2>/dev/null | awk '/sshd/ && !f {n=split($4,a,":"); print a[n]; f=1}')"
+    SSH_PORT="$(ss -tlnp 2>/dev/null | awk '/sshd/ && !f {n=split($4,a,":"); print a[n]; f=1}' || true)"
     SSH_PORT="${SSH_PORT:-22}"
     ufw allow "$SSH_PORT/tcp" >/dev/null
     ufw allow "$VISION_PORT/tcp" >/dev/null

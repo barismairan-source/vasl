@@ -23,6 +23,7 @@ usage() {
   sni-test <دامنه>...  بررسی مناسب بودن دامنه برای استتار REALITY
   autofix              امتحان خودکار دامنه‌های استتار تا وقتی سرور سالم شود
   sni <دامنه>          عوض کردن دامنه‌ی استتار
+  ssh                  تونل SSH با کاربر محدود (وقتی فقط SSH باز است)
   cdn <دامنه>          راه‌اندازی CDN کلادفلر با دامنه‌ی خودتان (WebSocket و XHTTP)
   relay                دستور نصب سرور ایران (ریلی) را می‌دهد
   relay-del            حذف لینک‌های ریلی از اشتراک
@@ -56,6 +57,7 @@ user_links() {
     id="$(uuid_of "$name")"
     [[ -n "$id" ]] || die "کاربر «$name» وجود ندارد."
     [[ ! -s "$RELAY_LINKS" ]] || cat "$RELAY_LINKS"
+    [[ -z "${SSH_TUNNEL_PASS:-}" ]] || echo "ssh://$SSH_TUNNEL_USER:$SSH_TUNNEL_PASS@$SERVER_IP:$SSH_TUNNEL_PORT#vasl-ssh"
     local common="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
     echo "vless://$id@$SERVER_IP:$VISION_PORT?$common&flow=xtls-rprx-vision&type=tcp&headerType=none#vasl-$name-vision"
     if extras_installed; then
@@ -597,6 +599,37 @@ case "$cmd" in
             if [[ "$(sub_token "$(uuid_of "$u")")" == "$tok" ]]; then user_links "$u"; exit 0; fi
         done < <(users)
         exit 1
+        ;;
+    ssh)
+        need_root; load_state
+        add_state SSH_TUNNEL_USER vasl-tunnel
+        add_state SSH_TUNNEL_PASS "$(openssl rand -hex 12)"
+        port="$(ss -tlnp 2>/dev/null | awk '/sshd/ && !f {n=split($4,a,":"); print a[n]; f=1}' || true)"
+        add_state SSH_TUNNEL_PORT "${port:-22}"
+        load_state
+        id -u "$SSH_TUNNEL_USER" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin "$SSH_TUNNEL_USER"
+        echo "$SSH_TUNNEL_USER:$SSH_TUNNEL_PASS" | chpasswd
+        # این کاربر فقط می‌تواند تونل بزند؛ نه شل، نه ترمینال
+        cat > /etc/ssh/sshd_config.d/10-vasl-tunnel.conf <<EOF
+Match User $SSH_TUNNEL_USER
+    PasswordAuthentication yes
+    AllowTcpForwarding yes
+    PermitTunnel no
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    ForceCommand /usr/sbin/nologin
+EOF
+        sshd -t || { rm -f /etc/ssh/sshd_config.d/10-vasl-tunnel.conf; die "تنظیم SSH معتبر نبود؛ تغییری اعمال نشد."; }
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd
+        echo "✅ تونل SSH فعال شد (کاربر جدا و محدود، نه root)."
+        echo
+        echo "مک (Terminal) — این را بزنید و پنجره را باز نگه دارید:"
+        echo "  ssh -N -D 1080 -o ServerAliveInterval=30 $SSH_TUNNEL_USER@$SERVER_IP -p $SSH_TUNNEL_PORT"
+        echo "  رمز: $SSH_TUNNEL_PASS"
+        echo
+        echo "Hiddify: لینک زیر هم به اشتراک اضافه شد:"
+        echo "  ssh://$SSH_TUNNEL_USER:$SSH_TUNNEL_PASS@$SERVER_IP:$SSH_TUNNEL_PORT#vasl-ssh"
         ;;
     cdn)
         need_root; load_state
