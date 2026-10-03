@@ -31,7 +31,7 @@ die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "این اسکریپت باید با root اجرا شود: sudo bash install.sh"
 command -v apt-get >/dev/null || die "فعلاً فقط Ubuntu/Debian پشتیبانی می‌شود."
-[[ -f "$SCRIPT_DIR/vasl.sh" ]] || die "فایل vasl.sh کنار install.sh پیدا نشد."
+[[ -f "$SCRIPT_DIR/vasl.sh" && -f "$SCRIPT_DIR/sub.py" ]] || die "فایل‌های vasl.sh و sub.py کنار install.sh پیدا نشدند."
 
 REINSTALL=0
 [[ "${1:-}" == "--reinstall" ]] && REINSTALL=1
@@ -47,12 +47,24 @@ XRAY=/usr/local/bin/xray
 "$XRAY" version | head -1
 
 install -m 0755 "$SCRIPT_DIR/vasl.sh" /usr/local/bin/vasl
+install -D -m 0755 "$SCRIPT_DIR/sub.py" /usr/local/lib/vasl/sub.py
+
+# بعد از نصب پایه، پروتکل‌های اضافه و لینک اشتراک را راه می‌اندازد
+finish() {
+    info "راه‌اندازی پروتکل‌های اضافه (Hysteria2، TUIC، تونل Cloudflare) و لینک اشتراک..."
+    vasl setup-extras
+    info "نصب تمام شد! 🎉"
+    echo
+    vasl sub
+    echo
+    echo "دستورهای مدیریت:  vasl help"
+    exit 0
+}
 
 if [[ -f "$STATE" && $REINSTALL -eq 0 ]]; then
     info "نصب قبلی پیدا شد؛ فقط Xray به‌روز شد و کلیدها دست نخوردند."
     systemctl restart xray
-    vasl links
-    exit 0
+    finish
 fi
 
 info "ساخت کلیدها..."
@@ -164,8 +176,4 @@ systemctl restart xray
 sleep 1
 systemctl is-active --quiet xray || die "سرویس Xray بالا نیامد. لاگ: journalctl -u xray -n 50"
 
-info "نصب تمام شد! 🎉"
-echo
-vasl links "$FIRST_USER"
-echo
-echo "دستورهای مدیریت:  vasl help"
+finish

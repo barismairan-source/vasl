@@ -22,6 +22,8 @@ usage() {
   sni-test <دامنه>...  بررسی مناسب بودن دامنه برای استتار REALITY
   autofix              امتحان خودکار دامنه‌های استتار تا وقتی سرور سالم شود
   sni <دامنه>          عوض کردن دامنه‌ی استتار
+  sub                  نمایش لینک اشتراک هر کاربر (همه‌ی روش‌های اتصال در یک لینک)
+  setup-extras         نصب/تعمیر Hysteria2، TUIC، تونل Cloudflare و سرور اشتراک
   diag                 عیب‌یابی کامل: تست سرور و بررسی رسیدن بسته‌ها از ایران
   status               وضعیت سرویس و لاگ‌های اخیر
   restart              راه‌اندازی دوباره‌ی سرویس
@@ -51,8 +53,162 @@ user_links() {
     [[ -n "$id" ]] || die "کاربر «$name» وجود ندارد."
     local common="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
     echo "vless://$id@$SERVER_IP:$VISION_PORT?$common&flow=xtls-rprx-vision&type=tcp&headerType=none#vasl-$name-vision"
+    if extras_installed; then
+        echo "hysteria2://$id@$SERVER_IP:$HY2_PORT?sni=$HY2_SNI&insecure=1&alpn=h3&obfs=salamander&obfs-password=$OBFS_PASS#vasl-$name-hy2"
+        echo "tuic://$id:$id@$SERVER_IP:$TUIC_PORT?congestion_control=bbr&alpn=h3&sni=$HY2_SNI&allow_insecure=1&insecure=1#vasl-$name-tuic"
+        local host; host="$(cdn_host)"
+        [[ -z "$host" ]] || echo "vless://$id@$host:443?encryption=none&security=tls&sni=$host&host=$host&fp=chrome&alpn=http%2F1.1&type=ws&path=$(urlencode "$WS_PATH")#vasl-$name-cdn"
+    fi
     echo "vless://$id@$SERVER_IP:$XHTTP_PORT?$common&type=xhttp&path=$(urlencode "$XHTTP_PATH")&mode=auto#vasl-$name-xhttp"
 }
+
+# ---------- پروتکل‌های اضافه: Hysteria2 و TUIC (sing-box)، تونل Cloudflare، لینک اشتراک ----------
+SB_BIN=/usr/local/bin/sing-box
+SB_CONF="$XRAY_DIR/singbox.json"
+CF_BIN=/usr/local/bin/cloudflared
+CERT="$XRAY_DIR/vasl-cert.pem"
+CERT_KEY="$XRAY_DIR/vasl-key.pem"
+SUB_PY=/usr/local/lib/vasl/sub.py
+
+extras_installed() { [[ -f /etc/systemd/system/vasl-singbox.service ]]; }
+
+add_state() { grep -q "^$1=" "$STATE" || echo "$1=$2" >> "$STATE"; }
+
+gh_latest() {
+    # آخرین نسخه‌ی یک پروژه در GitHub (بدون API، از روی redirect)
+    { curl -fsS -o /dev/null -w '%{redirect_url}' "https://github.com/$1/releases/latest" || true; } | sed 's#.*/tag/##'
+}
+
+cdn_host() { curl -s --max-time 3 http://127.0.0.1:20241/quicktunnel 2>/dev/null | jq -r '.hostname // empty' 2>/dev/null || true; }
+
+sub_token() { printf '%s' "$1$SUB_SECRET" | sha256sum | cut -c1-24; }
+
+sub_url() { echo "http://$SERVER_IP:$SUB_PORT/sub/$(sub_token "$(uuid_of "$1")")"; }
+
+render_singbox() {
+    extras_installed || return 0
+    local users tmp
+    users="$(jq -c '[.inbounds[] | select(.tag=="vision") | .settings.clients[] | {name: .email, uuid: .id}]' "$CONFIG")"
+    tmp="$(mktemp --suffix=.json)"
+    jq -n --argjson users "$users" --arg obfs "$OBFS_PASS" --arg cert "$CERT" --arg key "$CERT_KEY" \
+          --argjson hp "$HY2_PORT" --argjson tp "$TUIC_PORT" '
+        def tls: {enabled: true, alpn: ["h3"], certificate_path: $cert, key_path: $key};
+        {
+          log: {level: "warn"},
+          inbounds: [
+            {type: "hysteria2", tag: "hy2", listen: "::", listen_port: $hp,
+             users: [$users[] | {name, password: .uuid}],
+             obfs: {type: "salamander", password: $obfs}, tls: tls},
+            {type: "tuic", tag: "tuic", listen: "::", listen_port: $tp,
+             users: [$users[] | {name, uuid, password: .uuid}],
+             congestion_control: "bbr", tls: tls}
+          ],
+          outbounds: [{type: "direct", tag: "direct"}]
+        }' > "$tmp"
+    "$SB_BIN" check -c "$tmp" || { rm -f "$tmp"; die "کانفیگ sing-box معتبر نبود."; }
+    mv "$tmp" "$SB_CONF"; chmod 600 "$SB_CONF"
+    systemctl restart vasl-singbox
+}
+
+setup_extras() {
+    local arch ver tmp
+    case "$(uname -m)" in
+        x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;;
+        *) die "معماری $(uname -m) پشتیبانی نمی‌شود." ;;
+    esac
+
+    add_state HY2_PORT 443
+    add_state TUIC_PORT 8443
+    add_state HY2_SNI www.bing.com
+    add_state OBFS_PASS "$(openssl rand -hex 12)"
+    add_state SUB_PORT 2096
+    add_state SUB_SECRET "$(openssl rand -hex 16)"
+    add_state WS_PORT 10000
+    add_state WS_PATH "/$(openssl rand -hex 6)"
+    load_state
+
+    echo "  - sing-box (Hysteria2 + TUIC)"
+    ver="$(gh_latest SagerNet/sing-box)"; ver="${ver#v}"; ver="${ver:-1.14.2}"
+    if ! "$SB_BIN" version 2>/dev/null | grep -q "version $ver"; then
+        tmp="$(mktemp -d)"
+        curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-linux-$arch.tar.gz" | tar xz -C "$tmp"
+        install -m 0755 "$tmp"/sing-box-*/sing-box "$SB_BIN"; rm -rf "$tmp"
+    fi
+    [[ -f "$CERT" ]] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 3650 -nodes \
+        -subj "/CN=$HY2_SNI" -keyout "$CERT_KEY" -out "$CERT" 2>/dev/null
+    chmod 600 "$CERT_KEY"
+    cat > /etc/systemd/system/vasl-singbox.service <<EOF
+[Unit]
+Description=vasl sing-box (Hysteria2 + TUIC)
+After=network.target
+[Service]
+ExecStart=$SB_BIN run -c $SB_CONF
+Restart=always
+RestartSec=3
+LimitNOFILE=1000000
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    echo "  - ورودی WebSocket برای تونل Cloudflare"
+    if ! jq -e '.inbounds[] | select(.tag=="ws")' "$CONFIG" >/dev/null; then
+        tmp="$(mktemp --suffix=.json)"
+        jq --argjson port "$WS_PORT" --arg path "$WS_PATH" '
+            .inbounds += [{
+              tag: "ws", listen: "127.0.0.1", port: $port, protocol: "vless",
+              settings: {clients: [.inbounds[] | select(.tag=="xhttp") | .settings.clients[]], decryption: "none"},
+              streamSettings: {network: "ws", wsSettings: {path: $path}},
+              sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}
+            }]' "$CONFIG" > "$tmp"
+        apply_config "$tmp"
+    fi
+
+    echo "  - cloudflared (تونل رایگان Cloudflare، بدون نیاز به دامنه)"
+    if ! "$CF_BIN" --version >/dev/null 2>&1; then
+        curl -fsSL -o "$CF_BIN" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch"
+        chmod 0755 "$CF_BIN"
+    fi
+    cat > /etc/systemd/system/vasl-cdn.service <<EOF
+[Unit]
+Description=vasl Cloudflare quick tunnel
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=$CF_BIN tunnel --no-autoupdate --metrics 127.0.0.1:20241 --url http://127.0.0.1:$WS_PORT
+Restart=always
+RestartSec=5
+DynamicUser=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    echo "  - سرور لینک اشتراک"
+    cat > /etc/systemd/system/vasl-sub.service <<EOF
+[Unit]
+Description=vasl subscription server
+After=network.target
+[Service]
+ExecStart=/usr/bin/python3 $SUB_PY $SUB_PORT
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow "$HY2_PORT/udp" >/dev/null
+        ufw allow "$TUIC_PORT/udp" >/dev/null
+        ufw allow "$SUB_PORT/tcp" >/dev/null
+    fi
+
+    systemctl daemon-reload
+    systemctl enable -q vasl-singbox vasl-cdn vasl-sub
+    render_singbox
+    systemctl restart vasl-cdn vasl-sub
+    for _ in $(seq 1 20); do [[ -n "$(cdn_host)" ]] && break; sleep 1; done
+    [[ -n "$(cdn_host)" ]] || echo "  ⚠️ تونل Cloudflare هنوز آدرس نگرفته؛ چند دقیقه بعد خودش در لینک اشتراک اضافه می‌شود."
+}
+# ---------------------------------------------------------------------------------------------
 
 # سرور را از داخل خودش با یک کلاینت واقعی Xray تست می‌کند
 SELFTEST_LOG=/tmp/vasl-selftest.log
@@ -119,10 +275,12 @@ case "$cmd" in
         tmp="$(mktemp --suffix=.json)"
         jq --arg id "$id" --arg u "$name" '
             (.inbounds[] | select(.tag=="vision") | .settings.clients) += [{id: $id, flow: "xtls-rprx-vision", email: $u}]
-          | (.inbounds[] | select(.tag=="xhttp")  | .settings.clients) += [{id: $id, email: $u}]
+          | (.inbounds[] | select(.tag=="xhttp" or .tag=="ws") | .settings.clients) += [{id: $id, email: $u}]
         ' "$CONFIG" > "$tmp"
         apply_config "$tmp"
-        echo "کاربر «$name» ساخته شد:"
+        render_singbox
+        echo "کاربر «$name» ساخته شد."
+        extras_installed && echo "لینک اشتراک: $(sub_url "$name")"
         user_links "$name"
         ;;
     del)
@@ -133,6 +291,7 @@ case "$cmd" in
         tmp="$(mktemp --suffix=.json)"
         jq --arg u "$name" '(.inbounds[].settings.clients) |= map(select(.email != $u))' "$CONFIG" > "$tmp"
         apply_config "$tmp"
+        render_singbox
         echo "کاربر «$name» حذف شد."
         ;;
     links)
@@ -175,7 +334,11 @@ case "$cmd" in
         echo "== سرویس =="
         systemctl is-active xray || true
         ss -tlnp | grep xray || echo "Xray روی هیچ پورتی گوش نمی‌دهد!"
-        ufw status 2>/dev/null | head -8 || true
+        ufw status 2>/dev/null | head -12 || true
+        if extras_installed; then
+            for svc in vasl-singbox vasl-cdn vasl-sub; do printf '%-14s %s\n' "$svc" "$(systemctl is-active "$svc" || true)"; done
+            echo "آدرس تونل Cloudflare: $(cdn_host)"
+        fi
 
         echo; echo "== کلیدها =="
         "$XRAY" version | head -1
@@ -203,6 +366,24 @@ case "$cmd" in
         else
             echo "❌ هیچ بسته‌ای نرسید؛ مسیر بین ایران و این پورت‌ها بسته است."
         fi
+        ;;
+    setup-extras)
+        need_root; load_state
+        setup_extras
+        ;;
+    sub)
+        need_root; load_state
+        extras_installed || die "اول 'vasl setup-extras' را اجرا کنید."
+        echo "📎 لینک‌های اشتراک (این لینک را در Hiddify / v2rayNG / Streisand وارد کنید؛ اگر در مرورگر باز کنید، صفحه‌ی راهنما و QR می‌بینید):"
+        while read -r u; do echo "  $u: $(sub_url "$u")"; done < <(users)
+        ;;
+    sub-links)
+        load_state
+        tok="${1:-}"
+        while read -r u; do
+            if [[ "$(sub_token "$(uuid_of "$u")")" == "$tok" ]]; then user_links "$u"; exit 0; fi
+        done < <(users)
+        exit 1
         ;;
     sni)
         need_root; load_state

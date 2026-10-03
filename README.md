@@ -17,6 +17,20 @@ VPN شخصی روی سرور خودتان، با **Xray-core** و پروتکل *
 
 ---
 
+## لینک اشتراک: همه‌ی روش‌ها در یک لینک
+
+بعد از نصب، هر کاربر یک **لینک اشتراک** دارد (`vasl sub`). این لینک را یک بار در Hiddify یا v2rayNG وارد کنید؛ برنامه همه‌ی روش‌های زیر را می‌گیرد و هر ساعت به‌روزشان می‌کند. اگر لینک را در مرورگر باز کنید، صفحه‌ای فارسی با QR Code و دکمه‌ی کپی می‌بینید.
+
+| روش | پروتکل | پورت | کی به درد می‌خورد |
+|---|---|---|---|
+| `vision` | VLESS + REALITY روی TCP | 443/tcp | روش اصلی |
+| `hy2` | Hysteria2 با پوشش Salamander | 443/udp | خیلی سریع؛ اگر اپراتور UDP را نبندد |
+| `tuic` | TUIC v5 | 8443/udp | پشتیبان Hysteria2 |
+| `cdn` | VLESS + WebSocket از طریق تونل رایگان Cloudflare | — | وقتی IP سرور فیلتر شد؛ بدون نیاز به دامنه |
+| `xhttp` | VLESS + XHTTP + REALITY | 8443/tcp | فقط در v2rayN / v2rayNG |
+
+> آدرس تونل Cloudflare (`*.trycloudflare.com`) با هر ری‌استارت عوض می‌شود، ولی لینک اشتراک همیشه آدرس جدید را می‌دهد؛ فقط در برنامه «Update subscription» را بزنید.
+
 ## ۱. خرید سرور (VPS)
 
 - **سیستم‌عامل:** Ubuntu 22.04 یا 24.04
@@ -76,6 +90,7 @@ sudo SNI=www.speedtest.net VISION_PORT=443 XHTTP_PORT=8443 FIRST_USER=ali bash i
 vasl list              # فهرست کاربرها
 sudo vasl add mom      # کاربر جدید (برای هر نفر/دستگاه یکی بسازید)
 sudo vasl del mom      # حذف کاربر
+vasl sub               # لینک اشتراک هر کاربر (همه‌ی روش‌ها)
 vasl links             # همه‌ی لینک‌ها
 vasl qr mom            # QR Code
 sudo vasl diag         # عیب‌یابی کامل وقتی وصل نمیشه
