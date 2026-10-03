@@ -12,7 +12,8 @@
 # متغیرهای قابل تنظیم (قبل از اجرا export کنید):
 #   SNI=www.microsoft.com  VISION_PORT=443  XHTTP_PORT=8443  FIRST_USER=user1  SKIP_FIREWALL=0
 
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "[x] خطا در $(basename "$0") خط $LINENO (کد $?): $BASH_COMMAND" >&2' ERR
 
 SNI="${SNI:-www.microsoft.com}"
 VISION_PORT="${VISION_PORT:-443}"
@@ -44,7 +45,7 @@ apt-get install -y -qq curl jq openssl qrencode ca-certificates unzip >/dev/null
 info "نصب / به‌روزرسانی Xray-core از مخزن رسمی XTLS..."
 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 XRAY=/usr/local/bin/xray
-"$XRAY" version | head -1
+"$XRAY" version | sed -n 1p
 
 install -m 0755 "$SCRIPT_DIR/vasl.sh" /usr/local/bin/vasl
 install -D -m 0755 "$SCRIPT_DIR/sub.py" /usr/local/lib/vasl/sub.py
@@ -165,7 +166,7 @@ sysctl --system >/dev/null 2>&1 || warn "اعمال تنظیمات sysctl کام
 if [[ "$SKIP_FIREWALL" != "1" ]]; then
     info "تنظیم فایروال (ufw)..."
     apt-get install -y -qq ufw >/dev/null
-    SSH_PORT="$(ss -tlnp 2>/dev/null | awk '/sshd/ {n=split($4,a,":"); print a[n]; exit}')"
+    SSH_PORT="$(ss -tlnp 2>/dev/null | awk '/sshd/ && !f {n=split($4,a,":"); print a[n]; f=1}')"
     SSH_PORT="${SSH_PORT:-22}"
     ufw allow "$SSH_PORT/tcp" >/dev/null
     ufw allow "$VISION_PORT/tcp" >/dev/null

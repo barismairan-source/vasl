@@ -32,7 +32,7 @@ install -m 0755 "$tmp/xray" "$XRAY"
 mkdir -p "$ASSETS"; cp "$tmp"/geo*.dat "$ASSETS/"
 rm -rf "$tmp"
 export XRAY_LOCATION_ASSET="$ASSETS"
-"$XRAY" version | head -1
+"$XRAY" version | sed -n 1p
 
 # --- اتصال سرور ایران به سرور خارج را تست می‌کند و بهترین مسیر را برمی‌دارد ---
 de_outbound() {
@@ -138,7 +138,7 @@ systemctl restart vasl-relay
 sleep 1
 systemctl is-active --quiet vasl-relay || die "سرویس بالا نیامد: journalctl -u vasl-relay -n 30"
 
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$RELAY_PORT/tcp" >/dev/null; fi
+if command -v ufw >/dev/null && ufw status | grep "Status: active" >/dev/null; then ufw allow "$RELAY_PORT/tcp" >/dev/null; fi
 
 info "تست نهایی: کلاینت ← همین سرور ← سرور خارج..."
 FINAL="$(jq -n --argjson port "$RELAY_PORT" --arg id "$UUID" --arg sni "$IR_SNI" --arg pbk "$PUBLIC_KEY" --arg sid "$SHORT_ID" '{

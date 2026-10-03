@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ابزار مدیریت VPN شخصی (بعد از نصب با دستور `vasl` در دسترس است)
 
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "[x] خطا در $(basename "$0") خط $LINENO (کد $?): $BASH_COMMAND" >&2' ERR
 
 XRAY=/usr/local/bin/xray
 XRAY_DIR=/usr/local/etc/xray
@@ -148,7 +149,7 @@ setup_extras() {
 
     echo "  - sing-box (Hysteria2 + TUIC)"
     ver="$(gh_latest SagerNet/sing-box)"; ver="${ver#v}"; ver="${ver:-1.14.2}"
-    if ! "$SB_BIN" version 2>/dev/null | grep -q "version $ver"; then
+    if ! "$SB_BIN" version 2>/dev/null | grep "version $ver" >/dev/null; then
         tmp="$(mktemp -d)"
         curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v$ver/sing-box-$ver-linux-$arch.tar.gz" | tar xz -C "$tmp"
         install -m 0755 "$tmp"/sing-box-*/sing-box "$SB_BIN"; rm -rf "$tmp"
@@ -214,7 +215,7 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+    if command -v ufw >/dev/null && ufw status | grep "Status: active" >/dev/null; then
         ufw allow "$HY2_PORT/udp" >/dev/null
         ufw allow "$TUIC_PORT/udp" >/dev/null
         ufw allow "$SUB_PORT/tcp" >/dev/null
@@ -250,7 +251,7 @@ cf_add_rule() {  # zone phase rule-json
     if cf_ok <<<"$rs"; then
         id="$(jq -r .result.id <<<"$rs")"
         if jq -e --arg d "$desc" '.result.rules[]? | select(.description == $d)' <<<"$rs" >/dev/null; then
-            local rid; rid="$(jq -r --arg d "$desc" '.result.rules[] | select(.description == $d) | .id' <<<"$rs" | head -1)"
+            local rid; rid="$(jq -r --arg d "$desc" '.result.rules[] | select(.description == $d) | .id' <<<"$rs" | sed -n 1p)"
             cf PATCH "/zones/$zone/rulesets/$id/rules/$rid" "$rule" | cf_ok
         else
             cf POST "/zones/$zone/rulesets/$id/rules" "$rule" | cf_ok
@@ -270,7 +271,7 @@ cdn_links() {  # $1 = uuid, $2 = name
 
 cdn_probe() {  # از خود سرور، از مسیر Cloudflare به خودش وصل می‌شود
     local kind="$1" id cfg pid code ob
-    id="$(uuid_of "$(users | head -1)")"
+    id="$(uuid_of "$(users | sed -n 1p)")"
     if [[ $kind == ws ]]; then
         ob="$(jq -n --arg h "$CDN_HOST" --argjson p "$CDN_WS_EDGE" --arg id "$id" --arg path "$CDN_WS_PATH" '{protocol: "vless",
             settings: {vnext: [{address: $h, port: $p, users: [{id: $id, encryption: "none"}]}]},
@@ -363,7 +364,7 @@ setup_cdn() {
              streamSettings: {network: "xhttp", xhttpSettings: {path: $xpath, mode: "auto"}, security: "tls", tlsSettings: tls(["h2", "http/1.1"])},
              sniffing: {enabled: true, destOverride: ["http", "tls", "quic"], routeOnly: true}}]' "$CONFIG" > "$tmp"
     apply_config "$tmp"
-    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+    if command -v ufw >/dev/null && ufw status | grep "Status: active" >/dev/null; then
         ufw allow "$CDN_WS_PORT/tcp" >/dev/null; ufw allow "$CDN_XH_PORT/tcp" >/dev/null
     fi
 
@@ -384,7 +385,7 @@ setup_cdn() {
 SELFTEST_LOG=/tmp/vasl-selftest.log
 selftest() {
     local profile="$1" id port flow net cfg pid code
-    id="$(uuid_of "$(users | head -1)")"
+    id="$(uuid_of "$(users | sed -n 1p)")"
     if [[ $profile == vision ]]; then
         port=$VISION_PORT; flow=xtls-rprx-vision; net='{"network":"raw"}'
     else
@@ -504,14 +505,14 @@ case "$cmd" in
         echo "== سرویس =="
         systemctl is-active xray || true
         ss -tlnp | grep xray || echo "Xray روی هیچ پورتی گوش نمی‌دهد!"
-        ufw status 2>/dev/null | head -12 || true
+        ufw status 2>/dev/null | sed -n 1,12p || true
         if extras_installed; then
             for svc in vasl-singbox vasl-cdn vasl-sub; do printf '%-14s %s\n' "$svc" "$(systemctl is-active "$svc" || true)"; done
             echo "آدرس تونل Cloudflare: $(cdn_host)"
         fi
 
         echo; echo "== کلیدها =="
-        "$XRAY" version | head -1
+        "$XRAY" version | sed -n 1p
         priv="$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$CONFIG")"
         derived="$("$XRAY" x25519 -i "$priv" | sed -n '2s/^[^:]*:[[:space:]]*//p')"
         if [[ "$derived" == "$PUBLIC_KEY" ]]; then echo "✅ کلید عمومی با کلید خصوصی جور است"; else echo "❌ کلید عمومی اشتباه است ($PUBLIC_KEY != $derived)"; fi
@@ -563,7 +564,7 @@ case "$cmd" in
                     [[ $in -eq 0 && $outp -eq 0 ]] || printf '%-10s %-9s %-9s\n' "$p/${proto,,}" "$in" "$outp"
                 done
             done
-            echo "IPهای وصل‌شده: $(grep -oE '([0-9]+\.){3}[0-9]+\.[0-9]+ >' <<<"$out" | grep -v "$SERVER_IP" | sed -E 's/\.[0-9]+ >//' | sort -u | head -5 | tr '\n' ' ')"
+            echo "IPهای وصل‌شده: $(grep -oE '([0-9]+\.){3}[0-9]+\.[0-9]+ >' <<<"$out" | grep -v "$SERVER_IP" | sed -E 's/\.[0-9]+ >//' | sort -u | sed -n 1,5p | tr '\n' ' ')"
         fi
         echo; echo "== لاگ سرور در این ۴۰ ثانیه =="
         journalctl -u xray -u vasl-singbox --since "$since" --no-pager -o cat 2>/dev/null \
@@ -640,7 +641,7 @@ case "$cmd" in
         need_root; load_state
         [[ -n "${1:-}" ]] || die "دامنه را بدهید: vasl sni www.example.com"
         set_sni "$1"
-        echo "SNI عوض شد. لینک‌های جدید:"; user_links "$(users | head -1)"
+        echo "SNI عوض شد. لینک‌های جدید:"; user_links "$(users | sed -n 1p)"
         ;;
     autofix)
         need_root; load_state
@@ -662,7 +663,7 @@ case "$cmd" in
         die "هیچ دامنه‌ای کار نکرد. خروجی 'vasl diag' را بفرستید."
         ;;
     status)
-        systemctl --no-pager status xray | head -n 5
+        systemctl --no-pager status xray | sed -n 1,5p
         echo
         journalctl -u xray -n 20 --no-pager
         ;;
@@ -674,7 +675,7 @@ case "$cmd" in
         need_root
         bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
         systemctl restart xray
-        "$XRAY" version | head -1
+        "$XRAY" version | sed -n 1p
         ;;
     help|-h|--help)
         usage
