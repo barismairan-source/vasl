@@ -20,6 +20,8 @@ usage() {
   links [نام]          نمایش لینک‌های اتصال (همه یا یک کاربر)
   qr <نام>             نمایش QR Code برای اسکن با گوشی
   sni-test <دامنه>...  بررسی مناسب بودن دامنه برای استتار REALITY
+  autofix              امتحان خودکار دامنه‌های استتار تا وقتی سرور سالم شود
+  sni <دامنه>          عوض کردن دامنه‌ی استتار
   diag                 عیب‌یابی کامل: تست سرور و بررسی رسیدن بسته‌ها از ایران
   status               وضعیت سرویس و لاگ‌های اخیر
   restart              راه‌اندازی دوباره‌ی سرویس
@@ -50,6 +52,45 @@ user_links() {
     local common="encryption=none&security=reality&sni=$SNI&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID"
     echo "vless://$id@$SERVER_IP:$VISION_PORT?$common&flow=xtls-rprx-vision&type=tcp&headerType=none#vasl-$name-vision"
     echo "vless://$id@$SERVER_IP:$XHTTP_PORT?$common&type=xhttp&path=$(urlencode "$XHTTP_PATH")&mode=auto#vasl-$name-xhttp"
+}
+
+# سرور را از داخل خودش با یک کلاینت واقعی Xray تست می‌کند
+SELFTEST_LOG=/tmp/vasl-selftest.log
+selftest() {
+    local profile="$1" id port flow net cfg pid code
+    id="$(uuid_of "$(users | head -1)")"
+    if [[ $profile == vision ]]; then
+        port=$VISION_PORT; flow=xtls-rprx-vision; net='{"network":"raw"}'
+    else
+        port=$XHTTP_PORT; flow=""
+        net="$(jq -nc --arg p "$XHTTP_PATH" '{network:"xhttp",xhttpSettings:{path:$p,mode:"auto"}}')"
+    fi
+    cfg="$(mktemp --suffix=.json)"
+    jq -n --argjson port "$port" --arg id "$id" --arg flow "$flow" \
+          --arg sni "$SNI" --arg pbk "$PUBLIC_KEY" --arg sid "$SHORT_ID" --argjson net "$net" '{
+        log: {loglevel: "warning"},
+        inbounds: [{listen: "127.0.0.1", port: 10899, protocol: "socks", settings: {auth: "noauth", udp: false}}],
+        outbounds: [{protocol: "vless",
+          settings: {vnext: [{address: "127.0.0.1", port: $port, users: [{id: $id, encryption: "none", flow: $flow}]}]},
+          streamSettings: ($net + {security: "reality",
+            realitySettings: {serverName: $sni, fingerprint: "chrome", publicKey: $pbk, shortId: $sid}})}]
+    }' > "$cfg"
+    "$XRAY" run -config "$cfg" >"$SELFTEST_LOG" 2>&1 & pid=$!
+    sleep 2
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -x socks5h://127.0.0.1:10899 https://www.google.com/generate_204 || true)"
+    kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f "$cfg"
+    [[ "$code" == 204 ]]
+}
+
+# دامنه‌ی استتار را در کانفیگ و فایل وضعیت عوض می‌کند
+set_sni() {
+    local sni="$1" tmp
+    tmp="$(mktemp --suffix=.json)"
+    jq --arg s "$sni" '(.inbounds[].streamSettings.realitySettings) |= (.dest = ($s + ":443") | .serverNames = [$s])' "$CONFIG" > "$tmp"
+    apply_config "$tmp"
+    sed -i "s/^SNI=.*/SNI=$sni/" "$STATE"
+    SNI="$sni"
+    sleep 1
 }
 
 apply_config() {
@@ -136,32 +177,21 @@ case "$cmd" in
         ss -tlnp | grep xray || echo "Xray روی هیچ پورتی گوش نمی‌دهد!"
         ufw status 2>/dev/null | head -8 || true
 
-        echo; echo "== تست داخلی (سرور به خودش وصل می‌شود) =="
-        id="$(uuid_of "$(users | head -1)")"
+        echo; echo "== کلیدها =="
+        "$XRAY" version | head -1
+        priv="$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$CONFIG")"
+        derived="$("$XRAY" x25519 -i "$priv" | sed -n '2s/^[^:]*:[[:space:]]*//p')"
+        if [[ "$derived" == "$PUBLIC_KEY" ]]; then echo "✅ کلید عمومی با کلید خصوصی جور است"; else echo "❌ کلید عمومی اشتباه است ($PUBLIC_KEY != $derived)"; fi
+
+        echo; echo "== تست داخلی (SNI: $SNI) =="
         for profile in vision xhttp; do
-            if [[ $profile == vision ]]; then
-                port=$VISION_PORT; flow=xtls-rprx-vision
-                net='{"network":"raw"}'
-            else
-                port=$XHTTP_PORT; flow=""
-                net="$(jq -nc --arg p "$XHTTP_PATH" '{network:"xhttp",xhttpSettings:{path:$p,mode:"auto"}}')"
+            if selftest "$profile"; then echo "✅ $profile: سرور سالم است"; else
+                echo "❌ $profile: سرور جواب درست نداد. خطای کلاینت:"
+                grep -iE "error|fail|warn" "$SELFTEST_LOG" | tail -5 | sed 's/^/    /'
             fi
-            cfg="$(mktemp --suffix=.json)"
-            jq -n --arg ip "$SERVER_IP" --argjson port "$port" --arg id "$id" --arg flow "$flow" \
-                  --arg sni "$SNI" --arg pbk "$PUBLIC_KEY" --arg sid "$SHORT_ID" --argjson net "$net" '{
-                log: {loglevel: "none"},
-                inbounds: [{listen: "127.0.0.1", port: 10899, protocol: "socks"}],
-                outbounds: [{protocol: "vless",
-                  settings: {vnext: [{address: $ip, port: $port, users: [{id: $id, encryption: "none", flow: $flow}]}]},
-                  streamSettings: ($net + {security: "reality",
-                    realitySettings: {serverName: $sni, fingerprint: "chrome", publicKey: $pbk, shortId: $sid}})}]
-            }' > "$cfg"
-            "$XRAY" run -config "$cfg" >/dev/null 2>&1 & pid=$!
-            sleep 1.5
-            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -x socks5h://127.0.0.1:10899 https://www.google.com/generate_204 || true)"
-            kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true; rm -f "$cfg"
-            if [[ "$code" == 204 ]]; then echo "✅ $profile: سرور سالم است"; else echo "❌ $profile: سرور جواب درست نداد (کد: $code)"; fi
         done
+        echo "لاگ سرور:"
+        journalctl -u xray -n 8 --no-pager -o cat | sed 's/^/    /'
 
         echo; echo "== آیا بسته‌ها از ایران به سرور می‌رسند؟ =="
         command -v tcpdump >/dev/null || apt-get install -y -qq tcpdump >/dev/null
@@ -173,6 +203,31 @@ case "$cmd" in
         else
             echo "❌ هیچ بسته‌ای نرسید؛ مسیر بین ایران و این پورت‌ها بسته است."
         fi
+        ;;
+    sni)
+        need_root; load_state
+        [[ -n "${1:-}" ]] || die "دامنه را بدهید: vasl sni www.example.com"
+        set_sni "$1"
+        echo "SNI عوض شد. لینک‌های جدید:"; user_links "$(users | head -1)"
+        ;;
+    autofix)
+        need_root; load_state
+        priv="$(jq -r '.inbounds[0].streamSettings.realitySettings.privateKey' "$CONFIG")"
+        derived="$("$XRAY" x25519 -i "$priv" | sed -n '2s/^[^:]*:[[:space:]]*//p')"
+        if [[ -n "$derived" && "$derived" != "$PUBLIC_KEY" ]]; then
+            echo "کلید عمومی اشتباه بود؛ درستش کردم."
+            sed -i "s/^PUBLIC_KEY=.*/PUBLIC_KEY=$derived/" "$STATE"; PUBLIC_KEY="$derived"
+        fi
+        for d in "$SNI" www.speedtest.net dl.google.com www.samsung.com www.apple.com addons.mozilla.org www.nvidia.com github.com www.yahoo.com; do
+            [[ "$d" == "$SNI" ]] || set_sni "$d"
+            printf '%-25s ' "$d"
+            if selftest vision && selftest xhttp; then
+                echo "✅"; echo; echo "درست شد! لینک‌های جدید (قبلی‌ها را در برنامه پاک کنید):"; echo
+                while read -r u; do user_links "$u"; echo; done < <(users); exit 0
+            fi
+            echo "❌"
+        done
+        die "هیچ دامنه‌ای کار نکرد. خروجی 'vasl diag' را بفرستید."
         ;;
     status)
         systemctl --no-pager status xray | head -n 5
