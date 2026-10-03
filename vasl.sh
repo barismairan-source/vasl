@@ -356,16 +356,49 @@ case "$cmd" in
         echo "لاگ سرور:"
         journalctl -u xray -n 8 --no-pager -o cat | sed 's/^/    /'
 
-        echo; echo "== آیا بسته‌ها از ایران به سرور می‌رسند؟ =="
+        echo; echo "== آیا بسته‌ها از ایران به سرور می‌رسند و جواب می‌گیرند؟ =="
         command -v tcpdump >/dev/null || apt-get install -y -qq tcpdump >/dev/null
-        echo "👈 الان ۴۰ ثانیه وقت داری: فیلترشکن رو خاموش کن و توی Hiddify دکمه‌ی اتصال رو بزن..."
-        out="$(timeout 40 tcpdump -nni any -c 30 "tcp and (dst port $VISION_PORT or dst port $XHTTP_PORT) and not src host $SERVER_IP" 2>/dev/null || true)"
-        if [[ -n "$out" ]]; then
-            echo "✅ بسته رسید از:"
-            awk '{print $3, "->", $5}' <<<"$out" | sed 's/\.[0-9]* ->/ ->/' | sort | uniq -c | head
-        else
-            echo "❌ هیچ بسته‌ای نرسید؛ مسیر بین ایران و این پورت‌ها بسته است."
+        ports="$VISION_PORT $XHTTP_PORT"
+        extras_installed && ports="$ports $HY2_PORT $TUIC_PORT"
+        filter="$(for p in $ports; do printf 'port %s or ' "$p"; done | sed 's/ or $//')"
+
+        # موقتاً لاگ کامل را روشن می‌کنیم تا ببینیم سرور با اتصال‌ها چه می‌کند
+        restore_logs() {
+            jq '.log.loglevel = "warning"' "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG" && chmod 644 "$CONFIG"
+            systemctl restart xray
+            render_singbox
+        }
+        trap restore_logs EXIT
+        jq '.log.loglevel = "debug"' "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG" && chmod 644 "$CONFIG"
+        systemctl restart xray
+        if extras_installed; then
+            jq '.log.level = "debug"' "$SB_CONF" > "$SB_CONF.tmp" && mv "$SB_CONF.tmp" "$SB_CONF"
+            systemctl restart vasl-singbox
         fi
+        since="$(date '+%Y-%m-%d %H:%M:%S')"
+        sleep 1
+
+        echo "👈 الان ۴۰ ثانیه وقت داری: فیلترشکن رو خاموش کن و توی برنامه به vision وصل شو، چند ثانیه صبر کن، بعد hy2 رو امتحان کن..."
+        out="$(timeout 40 tcpdump -nnq -i any "($filter) and not host 127.0.0.1" 2>/dev/null || true)"
+        restore_logs; trap - EXIT
+
+        if [[ -z "$out" ]]; then
+            echo "❌ هیچ بسته‌ای نرسید؛ مسیر بین ایران و این پورت‌ها بسته است."
+        else
+            echo "پورت       از-ایران  به-ایران   (تعداد بسته)"
+            for p in $ports; do
+                for proto in tcp UDP; do
+                    in=$(grep -E "\.$p: $proto" <<<"$out" | wc -l)
+                    outp=$(grep -E "\.$p > .*: $proto" <<<"$out" | wc -l)
+                    [[ $in -eq 0 && $outp -eq 0 ]] || printf '%-10s %-9s %-9s\n' "$p/${proto,,}" "$in" "$outp"
+                done
+            done
+            echo "IPهای وصل‌شده: $(grep -oE '([0-9]+\.){3}[0-9]+\.[0-9]+ >' <<<"$out" | grep -v "$SERVER_IP" | sed -E 's/\.[0-9]+ >//' | sort -u | head -5 | tr '\n' ' ')"
+        fi
+        echo; echo "== لاگ سرور در این ۴۰ ثانیه =="
+        journalctl -u xray -u vasl-singbox --since "$since" --no-pager -o cat 2>/dev/null \
+            | grep -iE "reality|accepted|rejected|invalid|fail|error|closed|inbound|authenticat" \
+            | grep -v "127.0.0.1" | tail -25 | cut -c1-220 | sed 's/^/    /'
         ;;
     setup-extras)
         need_root; load_state
